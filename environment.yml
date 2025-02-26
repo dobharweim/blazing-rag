@@ -1,0 +1,19 @@
+name: rag_env
+channels:
+  - conda-forge
+  - pytorch
+  - defaults
+dependencies:
+  - python=3.9
+  - streamlit
+  - faiss-cpu
+  - sentence-transformers
+  - pytorch
+  - torchvision
+  - langchain
+  - langchain-community
+  - pypdf
+  - python-dotenv
+  - pip
+  - pip:
+      - langchain-groq
