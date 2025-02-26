@@ -17,3 +17,4 @@ dependencies:
   - pip
   - pip:
       - langchain-groq
+      - langchain-huggingface
