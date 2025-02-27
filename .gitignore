@@ -1,2 +1,5 @@
 uploads/
 .env
+chat_sessions.json
+vector_store/index.faiss
+vector_store/index.pkl
