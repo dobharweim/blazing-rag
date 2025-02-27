@@ -26,7 +26,7 @@ This repository contains a Streamlit application that demonstrates a multi-sessi
 1. **Clone the Repository:**
 
    ```bash
-   git clone https://github.com/yourusername/your-repo.git
+   git clone https://github.com/dobharweim/blazing-rag.git
    cd your-repo
    ```
 
