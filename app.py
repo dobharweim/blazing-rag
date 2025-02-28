@@ -51,40 +51,66 @@ if not GROQ_API_KEY:
     st.error("GROQ_API_KEY not set. Please set it in your environment or .env.")
     st.stop()
 
+
 def init_llm() -> ChatGroq:
+    """Initialize the ChatGroq LLM."""
     return ChatGroq(
-        groq_api_key=GROQ_API_KEY,
-        model_name="llama-3.3-70b-versatile",
-        temperature=0.0
+        groq_api_key=GROQ_API_KEY, model_name="llama-3.3-70b-versatile", temperature=0.0
     )
+
 
 # ---------------------------------------
 # Document Loading Functions
 # ---------------------------------------
 def load_documents_and_copy(folder_path: str, extensions: List[str]) -> List:
-    """Copy files to 'uploads/' and load them."""
+    """
+    Copy files from 'folder_path' to 'uploads/' and load them.
+    We also set doc.metadata["source"] = path so we can display filenames later.
+    """
     docs = []
     for root, _, files in os.walk(folder_path):
         for file in files:
             if any(file.endswith(ext) for ext in extensions):
                 os.makedirs("uploads", exist_ok=True)
-                src, dst = os.path.join(root, file), os.path.join("uploads", file)
+                src = os.path.join(root, file)
+                dst = os.path.join("uploads", file)
                 shutil.copyfile(src, dst)
-                loader = PyPDFLoader(dst) if file.endswith(".pdf") else TextLoader(dst)
-                docs.extend(loader.load())
+
+                if file.endswith(".pdf"):
+                    loader = PyPDFLoader(dst)
+                else:
+                    loader = TextLoader(dst)
+
+                loaded_docs = loader.load()
+                for d in loaded_docs:
+                    d.metadata["source"] = dst  # Store path in metadata
+                docs.extend(loaded_docs)
     return docs
 
+
 def load_uploaded_files(uploaded_files) -> List:
-    """Save and load uploaded files."""
+    """
+    Save uploaded files to 'uploads/' and load them.
+    Also set doc.metadata["source"] = path for each doc.
+    """
     docs = []
     for f in uploaded_files:
         path = os.path.join("uploads", f.name)
         os.makedirs("uploads", exist_ok=True)
         with open(path, "wb") as file:
             file.write(f.read())
-        loader = PyPDFLoader(path) if f.name.endswith(".pdf") else TextLoader(path)
-        docs.extend(loader.load())
+
+        if f.name.endswith(".pdf"):
+            loader = PyPDFLoader(path)
+        else:
+            loader = TextLoader(path)
+
+        loaded_docs = loader.load()
+        for d in loaded_docs:
+            d.metadata["source"] = path
+        docs.extend(loaded_docs)
     return docs
+
 
 # ---------------------------------------
 # Vector Store Persistence
@@ -92,39 +118,76 @@ def load_uploaded_files(uploaded_files) -> List:
 def build_vector_store(docs: List):
     splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
     chunks = splitter.split_documents(docs)
-    embedding_fn = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    vector_store = FAISS.from_texts([doc.page_content for doc in chunks], embedding_fn)
+
+    embedding_fn = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
+
+    # IMPORTANT: Provide metadata in a parallel list
+    vector_store = FAISS.from_texts(
+        [chunk.page_content for chunk in chunks],
+        embedding_fn,
+        metadatas=[chunk.metadata for chunk in chunks],
+    )
     vector_store.save_local(VECTOR_STORE_PATH)
     return vector_store
 
+
 def load_vector_store():
+    """
+    Load the FAISS index if it exists. We allow 'dangerous' deserialization
+    because FAISS uses pickle under the hood.
+    """
     if os.path.exists(VECTOR_STORE_PATH):
-        embedding_fn = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-        # Set allow_dangerous_deserialization=True to permit loading of pickle files.
-        return FAISS.load_local(VECTOR_STORE_PATH, embedding_fn, allow_dangerous_deserialization=True)
+        embedding_fn = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        )
+        return FAISS.load_local(
+            VECTOR_STORE_PATH, embedding_fn, allow_dangerous_deserialization=True
+        )
     return None
+
 
 # ---------------------------------------
 # Chat Sessions Persistence (Multi-Session)
 # ---------------------------------------
 def save_chat_sessions():
+    """Save all chat sessions to disk as JSON."""
     with open(CHAT_SESSIONS_PATH, "w") as f:
         json.dump(st.session_state.chat_sessions, f, indent=2)
 
+
 def load_chat_sessions():
+    """Load chat sessions from JSON if it exists."""
     if os.path.exists(CHAT_SESSIONS_PATH):
         with open(CHAT_SESSIONS_PATH, "r") as f:
             st.session_state.chat_sessions = json.load(f)
 
+
 def save_current_session():
-    messages = [
-        {"role": "user" if isinstance(msg, HumanMessage) else "assistant", "content": msg.content}
-        for msg in st.session_state.chat_history.messages
-    ]
+    """
+    Store the current conversation in st.session_state.chat_sessions
+    under the current session name, then save to disk.
+    """
+    messages = []
+    for msg in st.session_state.chat_history.messages:
+        if isinstance(msg, HumanMessage):
+            role = "user"
+        elif isinstance(msg, AIMessage):
+            role = "assistant"
+        else:
+            role = "system"
+        messages.append({"role": role, "content": msg.content})
+
     st.session_state.chat_sessions[st.session_state.current_session] = messages
     save_chat_sessions()
 
+
 def load_current_session():
+    """
+    Load messages for the current session from chat_sessions and
+    populate st.session_state.chat_history.
+    """
     st.session_state.chat_history = StreamlitChatMessageHistory(key="chat_messages")
     messages = st.session_state.chat_sessions.get(st.session_state.current_session, [])
     for msg in messages:
@@ -133,77 +196,109 @@ def load_current_session():
         elif msg["role"] == "assistant":
             st.session_state.chat_history.add_ai_message(msg["content"])
 
+
 # Load chat sessions on app start
 load_chat_sessions()
+
 
 # ---------------------------------------
 # Conversational Chain Setup
 # ---------------------------------------
 def init_chat_chain(vector_store: FAISS) -> ConversationalRetrievalChain:
+    """
+    Build a ConversationalRetrievalChain with:
+      - ChatGroq LLM
+      - FAISS retriever
+      - ConversationBufferMemory with explicit input_key/output_key
+      - chain_type='stuff' (preserves source docs)
+      - return_source_documents=True (so we can display them)
+      - output_key='answer' (the main output for memory)
+    """
     memory = ConversationBufferMemory(
         memory_key="chat_history",
         chat_memory=st.session_state.chat_history,
-        return_messages=True
+        return_messages=True,
+        input_key="question",
+        output_key="answer",
     )
-    return ConversationalRetrievalChain.from_llm(
+    chain = ConversationalRetrievalChain.from_llm(
         llm=init_llm(),
         retriever=vector_store.as_retriever(),
         memory=memory,
+        chain_type="stuff",
+        return_source_documents=True,
+        output_key="answer",
     )
+    return chain
 
+
+# ---------------------------------------
+# Streamlit App Layout
+# ---------------------------------------
 st.set_page_config(page_title="📚 Multi-Session RAG", layout="wide")
 st.title("📚 Multi-Session Conversational RAG")
 
-# ---------------------------
+# ---------------------------------------
 # Sidebar: Chat Session Management
-# ---------------------------
+# ---------------------------------------
 with st.sidebar:
     st.header("💬 Chat Session Management")
     session_names = list(st.session_state.chat_sessions.keys())
     session_names.insert(0, "New Chat")
     selected_session = st.selectbox("Choose a session:", session_names, index=0)
-    
+
+    # Start a new chat session
     if selected_session == "New Chat":
         new_session_name = st.text_input("New Session Name", "")
         if st.button("Start New Chat") and new_session_name:
             st.session_state.current_session = new_session_name
             st.session_state.chat_sessions[new_session_name] = []
-            st.session_state.chat_history = StreamlitChatMessageHistory(key="chat_messages")
+            st.session_state.chat_history = StreamlitChatMessageHistory(
+                key="chat_messages"
+            )
             if st.session_state.vector_store:
-                st.session_state.chat_chain = init_chat_chain(st.session_state.vector_store)
+                st.session_state.chat_chain = init_chat_chain(
+                    st.session_state.vector_store
+                )
             save_chat_sessions()
             st.rerun()
     else:
+        # Load an existing session
         if selected_session != st.session_state.current_session:
             st.session_state.current_session = selected_session
             load_current_session()
-    
+
+    # Clear current session's history
     if st.button("Clear Chat History"):
         st.session_state.chat_history = StreamlitChatMessageHistory(key="chat_messages")
         st.session_state.chat_sessions[st.session_state.current_session] = []
         save_chat_sessions()
         st.rerun()
-    
+
+    # Delete current session
     if st.button("Delete Current Chat Session"):
         if st.session_state.current_session in st.session_state.chat_sessions:
             del st.session_state.chat_sessions[st.session_state.current_session]
             save_chat_sessions()
             st.session_state.current_session = "Default"
-            st.session_state.chat_history = StreamlitChatMessageHistory(key="chat_messages")
+            st.session_state.chat_history = StreamlitChatMessageHistory(
+                key="chat_messages"
+            )
             st.rerun()
 
-# ---------------------------
+# ---------------------------------------
 # Sidebar: Document Loader
-# ---------------------------
+# ---------------------------------------
 with st.sidebar:
     st.header("📂 Document Loader")
     method = st.radio("Upload method:", ("Upload Files", "Specify Folder"))
     new_docs = []
+
     if method == "Upload Files":
         uploaded_files = st.file_uploader(
             "Upload .txt, .md, or .pdf",
             type=["txt", "md", "pdf"],
-            accept_multiple_files=True
+            accept_multiple_files=True,
         )
         if uploaded_files and st.button("Process Upload"):
             new_docs = load_uploaded_files(uploaded_files)
@@ -213,21 +308,28 @@ with st.sidebar:
         extensions = [ext.strip() for ext in exts_str.split(",")]
         if folder and st.button("Load Folder"):
             new_docs = load_documents_and_copy(folder, extensions)
+
+    # If new docs were loaded, build a new vector store and chain
     if new_docs:
         st.session_state.docs = new_docs
         st.session_state.vector_store = build_vector_store(new_docs)
         st.session_state.chat_chain = init_chat_chain(st.session_state.vector_store)
         save_current_session()
+
+    # Show the list of loaded files
     if st.session_state.docs:
         with st.expander("Loaded Sources"):
-            unique_filenames = {os.path.basename(doc.metadata.get("source", "Unknown")) for doc in st.session_state.docs}
+            unique_filenames = {
+                os.path.basename(doc.metadata.get("source", "Unknown"))
+                for doc in st.session_state.docs
+            }
             st.write("Loaded files:")
             for file in sorted(unique_filenames):
                 st.markdown(f"- {file}")
 
-# ---------------------------
+# ---------------------------------------
 # Main Chat Interface
-# ---------------------------
+# ---------------------------------------
 if st.session_state.vector_store is None:
     st.session_state.vector_store = load_vector_store()
 if st.session_state.vector_store and st.session_state.chat_chain is None:
@@ -235,18 +337,32 @@ if st.session_state.vector_store and st.session_state.chat_chain is None:
 
 if st.session_state.vector_store:
     st.success("✅ Ready to chat!")
+
     user_input = st.text_input("Enter your question:")
     if user_input:
         with st.spinner("Fetching answer..."):
+            # Because we set input_key="question" and output_key="answer",
+            # we pass {"question": user_input} to the chain.
             response = st.session_state.chat_chain.invoke({"question": user_input})
+
+            # 'answer' is now the main output key
             answer = response["answer"]
+
             st.markdown("### Answer")
             st.write(answer)
+
+            # Save the updated conversation
             save_current_session()
-    if st.session_state.chat_history.messages:
-        st.write("### Conversation so far:")
-        for msg in st.session_state.chat_history.messages:
-            role = "User" if isinstance(msg, HumanMessage) else "Assistant"
-            st.write(f"**{role}:** {msg.content}")
+
+            # Show source docs if they exist
+            if "source_documents" in response and response["source_documents"]:
+                st.markdown("### Source Snippets:")
+                for i, doc in enumerate(response["source_documents"]):
+                    snippet = doc.page_content[:500]
+                    source_name = os.path.basename(
+                        doc.metadata.get("source", "Unknown")
+                    )
+                    st.markdown(f"**Source {i+1} ({source_name}):**")
+                    st.write(f"> {snippet}...")
 else:
     st.info("Upload files or specify a folder to start.")
