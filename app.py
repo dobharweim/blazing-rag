@@ -116,14 +116,16 @@ def load_uploaded_files(uploaded_files) -> List:
 # Vector Store Persistence
 # ---------------------------------------
 def build_vector_store(docs: List):
+    """
+    Split docs into chunks, embed them, and build a FAISS index. Then save locally.
+    We also pass chunk metadata to preserve the 'source' info.
+    """
     splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
     chunks = splitter.split_documents(docs)
 
     embedding_fn = HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
-
-    # IMPORTANT: Provide metadata in a parallel list
     vector_store = FAISS.from_texts(
         [chunk.page_content for chunk in chunks],
         embedding_fn,
@@ -139,12 +141,16 @@ def load_vector_store():
     because FAISS uses pickle under the hood.
     """
     if os.path.exists(VECTOR_STORE_PATH):
-        embedding_fn = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
-        )
-        return FAISS.load_local(
-            VECTOR_STORE_PATH, embedding_fn, allow_dangerous_deserialization=True
-        )
+        try:
+            embedding_fn = HuggingFaceEmbeddings(
+                model_name="sentence-transformers/all-MiniLM-L6-v2"
+            )
+            return FAISS.load_local(
+                VECTOR_STORE_PATH, embedding_fn, allow_dangerous_deserialization=True
+            )
+        except (FileNotFoundError, RuntimeError):
+            # The index folder/file might be incomplete or corrupted
+            return None
     return None
 
 
@@ -330,22 +336,20 @@ with st.sidebar:
 # ---------------------------------------
 # Main Chat Interface
 # ---------------------------------------
+# Only attempt to load an existing index if we haven't already
 if st.session_state.vector_store is None:
     st.session_state.vector_store = load_vector_store()
+
+# If we have a vector store, but no chain, initialize it
 if st.session_state.vector_store and st.session_state.chat_chain is None:
     st.session_state.chat_chain = init_chat_chain(st.session_state.vector_store)
 
 if st.session_state.vector_store:
     st.success("✅ Ready to chat!")
-
     user_input = st.text_input("Enter your question:")
     if user_input:
         with st.spinner("Fetching answer..."):
-            # Because we set input_key="question" and output_key="answer",
-            # we pass {"question": user_input} to the chain.
             response = st.session_state.chat_chain.invoke({"question": user_input})
-
-            # 'answer' is now the main output key
             answer = response["answer"]
 
             st.markdown("### Answer")
@@ -365,4 +369,4 @@ if st.session_state.vector_store:
                     st.markdown(f"**Source {i+1} ({source_name}):**")
                     st.write(f"> {snippet}...")
 else:
-    st.info("Upload files or specify a folder to start.")
+    st.info("No vector store yet. Upload documents or specify a folder to create one.")
